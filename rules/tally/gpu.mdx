@@ -1,0 +1,288 @@
+---
+title: "GPU rules"
+description: "tally GPU rules detect common mistakes in NVIDIA/CUDA Dockerfiles, including build-time hardware queries, redundant installs, and oversized final images."
+---
+
+tally includes six rules targeting GPU-specific patterns in Dockerfiles. These rules help catch mistakes that are unique to NVIDIA/CUDA workloads before they cause build failures, non-portable images, or unnecessarily large production containers.
+
+<Note>
+GPU rules auto-detect `nvidia/cuda` base images and only fire on stages that inherit from NVIDIA base images, unless otherwise noted. Non-GPU stages are not affected.
+</Note>
+
+## tally/gpu/no-buildtime-gpu-queries
+
+| | |
+|---|---|
+| **Severity** | Error |
+| **Default** | Enabled |
+| **Auto-fix** | No |
+
+GPU hardware is not available during `docker build`. Commands that query GPU hardware in `RUN` instructions — such as `nvidia-smi` or Python framework availability checks like `torch.cuda.is_available()` — will either fail outright or return misleading results (zero devices, `False`).
+
+This rule does not fire on `CMD` or `ENTRYPOINT`, where GPU queries are expected to run at container startup.
+
+**Detected patterns:**
+
+| Pattern | Description |
+|---------|-------------|
+| `nvidia-smi` | NVIDIA System Management Interface |
+| `nvidia-debugdump` | NVIDIA debug dump |
+| `torch.cuda.is_available()` | PyTorch CUDA check |
+| `torch.cuda.device_count()` | PyTorch device count |
+| `tf.test.is_gpu_available()` | TensorFlow GPU check |
+| `tf.config.list_physical_devices()` | TensorFlow device listing |
+
+**Violation:**
+
+```dockerfile
+FROM nvidia/cuda:12.2.0-devel-ubuntu22.04
+RUN nvidia-smi
+```
+
+```dockerfile
+FROM tensorflow/tensorflow:2.14.0-gpu
+RUN python -c "import tensorflow as tf; print(tf.test.is_gpu_available())"
+```
+
+**Fix — move GPU queries to `CMD` or `ENTRYPOINT`:**
+
+```dockerfile
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+CMD ["nvidia-smi", "--loop=10"]
+```
+
+**Configuration:**
+
+```toml
+[rules.tally."gpu/no-buildtime-gpu-queries"]
+severity = "error"
+```
+
+---
+
+## tally/gpu/no-container-runtime-in-image
+
+| | |
+|---|---|
+| **Severity** | Warning |
+| **Default** | Enabled |
+| **Auto-fix** | No |
+
+NVIDIA Container Toolkit packages (`nvidia-container-toolkit`, `nvidia-docker2`, `libnvidia-container*`) belong on the **host**, not inside the container image. Installing these packages inside the image does not enable GPU access — GPU device injection is handled by the host container runtime. It only bloats the image and masks the actual requirement that the host runtime must have the toolkit configured.
+
+**Violation:**
+
+```dockerfile
+FROM ubuntu:22.04
+RUN apt-get update && apt-get install -y nvidia-container-toolkit
+```
+
+```dockerfile
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+RUN apt-get update && apt-get install -y libnvidia-container1
+```
+
+**Fix — install only application-level packages:**
+
+```dockerfile
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+RUN apt-get update && apt-get install -y python3 python3-pip
+```
+
+**Configuration:**
+
+```toml
+[rules.tally."gpu/no-container-runtime-in-image"]
+severity = "warning"
+```
+
+---
+
+## tally/gpu/no-hardcoded-visible-devices 🔧
+
+| | |
+|---|---|
+| **Severity** | Warning |
+| **Default** | Enabled |
+| **Auto-fix** | Partial (safe and unsafe variants) |
+
+Detects `ENV` instructions that hardcode GPU visibility variables (`NVIDIA_VISIBLE_DEVICES`, `CUDA_VISIBLE_DEVICES`) inside the image. GPU visibility is deployment policy that should be set at runtime — via `docker run --gpus`, Kubernetes device plugins, or similar mechanisms — not baked into the image.
+
+**What is flagged:**
+
+| Pattern | Fix safety |
+|---------|-----------|
+| `ENV NVIDIA_VISIBLE_DEVICES=all` on `nvidia/cuda:*` base | `FixSafe` — redundant, base image already sets this |
+| `ENV NVIDIA_VISIBLE_DEVICES=0` or `=0,1` (device indices) | `FixSuggestion` — removes hardcoded indices |
+| `ENV NVIDIA_VISIBLE_DEVICES=GPU-<uuid>` | `FixSuggestion` — removes host-specific UUID |
+| `ENV CUDA_VISIBLE_DEVICES=<non-empty>` | `FixSuggestion` |
+| `ENV NVIDIA_VISIBLE_DEVICES=none` / `void` / empty | Not flagged — intentional disable |
+| `ENV NVIDIA_VISIBLE_DEVICES=${VAR}` (variable reference) | Not flagged — parameterized |
+
+**Violation:**
+
+```dockerfile
+# Redundant: nvidia/cuda already sets NVIDIA_VISIBLE_DEVICES=all
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+ENV NVIDIA_VISIBLE_DEVICES=all
+```
+
+```dockerfile
+# Hardcoded device indices make the image non-portable
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+ENV NVIDIA_VISIBLE_DEVICES=0,1
+```
+
+**Fix — use parameterized form or set at runtime:**
+
+```dockerfile
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+ARG GPU_DEVICES=all
+ENV NVIDIA_VISIBLE_DEVICES=${GPU_DEVICES}
+```
+
+**Configuration:**
+
+```toml
+[rules.tally."gpu/no-hardcoded-visible-devices"]
+severity = "warning"
+```
+
+---
+
+## tally/gpu/no-redundant-cuda-install
+
+| | |
+|---|---|
+| **Severity** | Warning |
+| **Default** | Enabled |
+| **Auto-fix** | No |
+
+Detects `RUN` instructions that install CUDA packages via a package manager in stages that already inherit from `nvidia/cuda:*`. The CUDA stack is already provided by the base image for the selected variant, so reinstalling it wastes space, can introduce version drift, and creates two sources of truth for the CUDA version.
+
+The rule is **flavor-aware**: it parses the image tag variant (`base`, `runtime`, `devel`) and only flags packages that the variant already includes. Installing `cuda-toolkit` on a `runtime` image is legitimate (runtime does not include the toolkit), but installing it on a `devel` image is redundant.
+
+**Violation:**
+
+```dockerfile
+# devel includes the full toolkit — reinstalling is redundant
+FROM nvidia/cuda:12.2.0-devel-ubuntu22.04
+RUN apt-get update && apt-get install -y cuda-toolkit
+```
+
+```dockerfile
+# cudnn tag already includes cuDNN — reinstalling is redundant
+FROM nvidia/cuda:12.2.0-cudnn-devel-ubuntu22.04
+RUN apt-get update && apt-get install -y libcudnn8
+```
+
+**No violation (legitimate install on `runtime` variant):**
+
+```dockerfile
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+RUN apt-get update && apt-get install -y cuda-toolkit
+```
+
+**Configuration:**
+
+```toml
+[rules.tally."gpu/no-redundant-cuda-install"]
+severity = "warning"
+```
+
+---
+
+## tally/gpu/prefer-minimal-driver-capabilities 🔧
+
+| | |
+|---|---|
+| **Severity** | Info |
+| **Default** | Enabled |
+| **Auto-fix** | Yes (suggestion — `--fix --fix-unsafe`) |
+
+`ENV NVIDIA_DRIVER_CAPABILITIES=all` mounts every NVIDIA driver library and binary into the container. Most ML and CUDA workloads only need `compute,utility` (NVIDIA's documented default). The `all` value also exposes `graphics`, `video`, `display`, and `compat32` capabilities that most inference and training workloads never use.
+
+**What is flagged:**
+
+| Pattern | Flagged? |
+|---------|----------|
+| `ENV NVIDIA_DRIVER_CAPABILITIES=all` | Yes |
+| `ENV NVIDIA_DRIVER_CAPABILITIES=ALL` (case-insensitive) | Yes |
+| `ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility` | No — already minimal |
+| `ENV NVIDIA_DRIVER_CAPABILITIES=${VAR}` | No — parameterized |
+
+**Violation:**
+
+```dockerfile
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+ENV NVIDIA_DRIVER_CAPABILITIES=all
+```
+
+**Fix (replaces `all` with `compute,utility`):**
+
+```dockerfile
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+```
+
+<Note>
+Review before applying — workloads that need rendering, video encoding, or display output (`graphics`, `video`, `display` capabilities) should list those explicitly rather than reverting to `all`.
+</Note>
+
+**Configuration:**
+
+```toml
+[rules.tally."gpu/prefer-minimal-driver-capabilities"]
+severity = "info"
+```
+
+---
+
+## tally/gpu/prefer-runtime-final-stage
+
+| | |
+|---|---|
+| **Severity** | Warning |
+| **Default** | Enabled |
+| **Auto-fix** | No |
+
+Fires when the final stage uses `nvidia/cuda:*devel*` as its base image without obvious compile-time needs. The `devel` variant includes `nvcc`, development headers, and static libraries that add 2–4 GB to the image compared to the corresponding `runtime` variant. Shipping compiler toolchains in a production image increases attack surface and slows pull times.
+
+**Compile signals that suppress the rule:** presence of `nvcc`, `gcc`, `g++`, `make`, `cmake`, `ninja`, or packages like `build-essential` in the final stage.
+
+**Violation (single-stage devel with no compilation):**
+
+```dockerfile
+FROM nvidia/cuda:12.2.0-devel-ubuntu22.04
+RUN pip install torch
+CMD ["python", "app.py"]
+```
+
+**Violation (final stage uses devel but only runs pre-built binaries):**
+
+```dockerfile
+FROM nvidia/cuda:12.2.0-devel-ubuntu22.04 AS builder
+RUN nvcc -o /app main.cu
+
+FROM nvidia/cuda:12.2.0-devel-ubuntu22.04
+COPY --from=builder /app /app
+CMD ["/app"]
+```
+
+**Fix — use a runtime variant for the final stage:**
+
+```dockerfile
+FROM nvidia/cuda:12.2.0-devel-ubuntu22.04 AS builder
+RUN nvcc -o /app main.cu
+
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+COPY --from=builder /app /app
+CMD ["/app"]
+```
+
+**Configuration:**
+
+```toml
+[rules.tally."gpu/prefer-runtime-final-stage"]
+severity = "warning"
+```

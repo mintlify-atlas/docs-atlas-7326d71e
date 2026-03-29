@@ -1,0 +1,298 @@
+---
+title: "Security rules"
+description: "tally security rules detect hardcoded secrets, insecure privilege patterns, and misconfigured credential handling in Dockerfiles."
+---
+
+tally includes six security rules covering secret detection, attestation hygiene, privilege escalation, and file ownership. All are enabled by default except `tally/require-secret-mounts`, which requires user configuration.
+
+## tally/secrets-in-code
+
+| | |
+|---|---|
+| **Severity** | Error |
+| **Default** | Enabled |
+| **Auto-fix** | No |
+
+Scans Dockerfile content for actual secret values using [gitleaks](https://github.com/gitleaks/gitleaks) patterns (222+ patterns covering AWS keys, GitHub tokens, private keys, and more).
+
+Checked locations:
+
+- `RUN` commands and heredocs
+- `COPY`/`ADD` heredocs
+- `ENV` values
+- `ARG` default values
+- `LABEL` values
+
+<Note>
+This rule complements `buildkit/SecretsUsedInArgOrEnv`. BuildKit's rule checks variable *names* (e.g., `GITHUB_TOKEN`), while this rule detects actual secret *values*.
+</Note>
+
+**Violation:**
+
+```dockerfile
+ENV AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+ENV AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+
+RUN curl -H "Authorization: Bearer ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
+    https://api.github.com/user
+```
+
+**Fix — use BuildKit secret mounts or ARG:**
+
+```dockerfile
+# Option 1: BuildKit secret mount
+RUN --mount=type=secret,id=aws_key \
+    AWS_ACCESS_KEY_ID=$(cat /run/secrets/aws_key) \
+    aws s3 cp ...
+
+# Option 2: ARG without a default value (passed at build time)
+ARG GITHUB_TOKEN
+RUN curl -H "Authorization: Bearer $GITHUB_TOKEN" \
+    https://api.github.com/user
+```
+
+**Configuration:**
+
+```toml
+[rules.tally.secrets-in-code]
+severity = "error"
+```
+
+---
+
+## tally/prefer-vex-attestation
+
+| | |
+|---|---|
+| **Severity** | Info |
+| **Default** | Enabled |
+| **Auto-fix** | No |
+
+Recommends attaching OpenVEX documents as OCI attestations instead of copying `*.vex.json` files into the image filesystem.
+
+Embedding VEX inside the runtime image requires a full image rebuild to update statements, makes discovery inconsistent, and expands the runtime payload. Attaching VEX as an OCI attestation (in-toto predicate) to the image digest is the preferred approach.
+
+<Note>
+If an image has any OCI attestations, Docker Scout ignores filesystem-embedded VEX entirely and only reads attestation-backed exceptions.
+</Note>
+
+**Violation:**
+
+```dockerfile
+FROM alpine:3.20
+COPY *.vex.json /usr/share/vex/
+```
+
+**Fix — attach as an OCI attestation in CI instead:**
+
+```bash
+# Docker Scout
+docker scout attestation add \
+  --file app.vex.json \
+  --predicate-type https://openvex.dev/ns/v0.2.0 \
+  myimage:latest
+
+# cosign
+cosign attest \
+  --predicate app.vex.json \
+  --type https://openvex.dev/ns/v0.2.0 \
+  myimage:latest
+```
+
+**Configuration:**
+
+```toml
+[rules.tally.prefer-vex-attestation]
+severity = "info"
+```
+
+---
+
+## tally/require-secret-mounts 🔧
+
+| | |
+|---|---|
+| **Severity** | Warning |
+| **Default** | Off (requires configuration) |
+| **Auto-fix** | Yes (`--fix`) |
+
+Enforces `--mount=type=secret` on `RUN` instructions that execute commands requiring private registry credentials, API keys, or cloud provider tokens.
+
+This rule is disabled by default. Enable it by mapping command names to secret mount specifications in `.tally.toml`:
+
+```toml
+[rules.tally.require-secret-mounts]
+severity = "warning"
+
+# File-based secret
+[rules.tally.require-secret-mounts.commands.pip]
+id = "pipconf"
+target = "/root/.config/pip/pip.conf"
+required = true
+
+# Environment variable secret
+[rules.tally.require-secret-mounts.commands.gh]
+id = "gh-token"
+env = "GH_TOKEN"
+
+# Both file and env var
+[rules.tally.require-secret-mounts.commands.aws]
+id = "aws-creds"
+target = "/root/.aws/credentials"
+env = "AWS_SHARED_CREDENTIALS_FILE"
+required = true
+```
+
+**Violation (with `pip` configured above):**
+
+```dockerfile
+FROM python:3.12-slim
+RUN pip install -r requirements.txt
+```
+
+**After `--fix`:**
+
+```dockerfile
+FROM python:3.12-slim
+RUN --mount=type=secret,id=pipconf,target=/root/.config/pip/pip.conf \
+    pip install -r requirements.txt
+```
+
+---
+
+## tally/stateful-root-runtime
+
+| | |
+|---|---|
+| **Severity** | Warning |
+| **Default** | Enabled |
+| **Auto-fix** | No |
+
+Fires when the final stage runs as root (explicitly or implicitly) **and** signals mutable or persistent state via `VOLUME`, data directory `WORKDIR`, `COPY`/`ADD` to state paths, or `RUN mkdir` creating state directories.
+
+This is a more targeted complement to `hadolint/DL3002`. DL3002 warns whenever `USER root` appears; this rule only fires when root intersects with mutable state.
+
+**Stateful signals detected:** `VOLUME` instructions; `WORKDIR`, `COPY`, `ADD`, or `RUN mkdir` targeting `/data`, `/srv`, `/var/lib/*`, `/var/log/*`, `/var/cache/*`, `/var/run/*`, `/var/spool/*`.
+
+**Automatically suppressed** when a privilege-drop tool (`gosu`, `su-exec`, `suexec`, `setpriv`) is referenced in `ENTRYPOINT` or `CMD`, or when the base image is known to default to non-root (distroless `:nonroot`, Chainguard images).
+
+**Violation:**
+
+```dockerfile
+FROM ubuntu:22.04
+VOLUME /var/lib/data
+CMD ["app"]
+```
+
+**Fix:**
+
+```dockerfile
+FROM ubuntu:22.04
+RUN useradd -r -u 1000 appuser
+USER appuser
+VOLUME /data
+CMD ["app"]
+```
+
+**Configuration:**
+
+```toml
+[rules.tally.stateful-root-runtime]
+severity = "warning"
+```
+
+---
+
+## tally/user-created-but-never-used 🔧
+
+| | |
+|---|---|
+| **Severity** | Warning |
+| **Default** | Enabled |
+| **Auto-fix** | Yes (unsafe — requires `--fix --fix-unsafe`) |
+
+Detects when the final stage creates a user via `useradd`, `adduser`, `net user /add`, or `New-LocalUser` but the container's effective runtime identity remains root — no `USER` instruction switches to the created user.
+
+The rule walks the `FROM` ancestry chain, so users created in parent stages and inherited via `FROM` are also detected.
+
+**Automatically suppressed** when a privilege-drop tool (`gosu`, `su-exec`) is used in `ENTRYPOINT`/`CMD`, when the base image defaults to non-root, or when the created user appears in ownership context (`COPY --chown`, `RUN chown`, `icacls`).
+
+**Violation:**
+
+```dockerfile
+FROM ubuntu:22.04
+RUN useradd -r appuser
+CMD ["app"]
+```
+
+**Fix:**
+
+```dockerfile
+FROM ubuntu:22.04
+RUN useradd -r -u 1000 appuser
+USER appuser
+CMD ["app"]
+```
+
+**Configuration:**
+
+```toml
+[rules.tally.user-created-but-never-used]
+severity = "warning"
+```
+
+---
+
+## tally/copy-after-user-without-chown 🔧
+
+| | |
+|---|---|
+| **Severity** | Warning |
+| **Default** | Enabled |
+| **Auto-fix** | Yes (`--fix`) |
+
+Docker's `COPY` and `ADD` always create files owned by `root:root` regardless of the active `USER` instruction. This rule detects `COPY` or `ADD` instructions that follow a non-root `USER` without an explicit `--chown` flag, which means the non-root process may be unable to write to the copied files at runtime.
+
+**Automatically suppressed** when `--chown` is already set, when the effective `USER` is root, or when a subsequent `RUN chown` in the same stage manages ownership explicitly.
+
+Two auto-fix alternatives are offered:
+
+1. **Add `--chown=<user>`** (preferred) — sets ownership to match the active `USER`.
+2. **Move `USER` after COPY** — clarifies that `USER` only affects `RUN`, `WORKDIR`, and runtime identity.
+
+**Violation:**
+
+```dockerfile
+FROM ubuntu:22.04
+RUN useradd -r appuser
+USER appuser
+COPY app /app
+CMD ["/app"]
+```
+
+**Fix (option 1 — add `--chown`):**
+
+```dockerfile
+FROM ubuntu:22.04
+RUN useradd -r appuser
+USER appuser
+COPY --chown=appuser app /app
+CMD ["/app"]
+```
+
+**Fix (option 2 — move `USER`):**
+
+```dockerfile
+FROM ubuntu:22.04
+RUN useradd -r appuser
+COPY app /app
+USER appuser
+CMD ["/app"]
+```
+
+**Configuration:**
+
+```toml
+[rules.tally.copy-after-user-without-chown]
+severity = "warning"
+```

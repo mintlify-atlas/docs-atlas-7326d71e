@@ -1,0 +1,433 @@
+---
+title: "Style rules"
+description: "tally style rules enforce consistent formatting, ordering, and indentation in Dockerfiles. All style rules are auto-fixable with tally lint --fix."
+---
+
+tally includes 12 style rules that cover whitespace, ordering, sorting, and formatting conventions. Every style rule is auto-fixable.
+
+<Tip>
+Run `tally lint --fix Dockerfile` to apply all safe style fixes in a single pass. Style rules compose correctly — running `--fix` multiple times produces a stable, idempotent result.
+</Tip>
+
+## tally/newline-between-instructions 🔧
+
+| | |
+|---|---|
+| **Severity** | Style |
+| **Default** | Enabled (grouped mode) |
+| **Auto-fix** | Yes (`--fix`) |
+
+Controls blank lines between Dockerfile instructions. Three modes are available:
+
+- **`grouped`** (default) — same instruction types are grouped together without blank lines between them; different types are separated by exactly one blank line.
+- **`always`** — every instruction is followed by at least one blank line.
+- **`never`** — all blank lines between instructions are removed.
+
+**Violation (grouped mode — missing blank line between different types):**
+
+```dockerfile
+FROM alpine:3.20
+RUN echo hello
+```
+
+**Fix:**
+
+```dockerfile
+FROM alpine:3.20
+
+RUN echo hello
+```
+
+**Violation (grouped mode — blank line between same types):**
+
+```dockerfile
+ENV FOO=bar
+
+ENV BAZ=qux
+```
+
+**Fix:**
+
+```dockerfile
+ENV FOO=bar
+ENV BAZ=qux
+```
+
+**Configuration:**
+
+```toml
+[rules.tally.newline-between-instructions]
+mode = "always"   # "grouped" | "always" | "never"
+```
+
+---
+
+## tally/no-multi-spaces 🔧
+
+| | |
+|---|---|
+| **Severity** | Style |
+| **Default** | Enabled |
+| **Auto-fix** | Yes (`--fix`) |
+
+Disallows multiple consecutive spaces within Dockerfile instructions. Multiple spaces are almost always accidental and make the file harder to read.
+
+Leading indentation, heredoc body lines, and comment lines are excluded.
+
+**Violation:**
+
+```dockerfile
+FROM  alpine:3.20
+RUN  apk add  --no-cache  curl
+```
+
+**Fix:**
+
+```dockerfile
+FROM alpine:3.20
+RUN apk add --no-cache curl
+```
+
+---
+
+## tally/no-multiple-empty-lines 🔧
+
+| | |
+|---|---|
+| **Severity** | Style |
+| **Default** | Enabled |
+| **Auto-fix** | Yes (`--fix`) |
+
+Disallows more than one consecutive empty line anywhere in the file.
+
+**Violation:**
+
+```dockerfile
+FROM alpine:3.20
+
+
+RUN apk add --no-cache curl
+```
+
+**Fix:**
+
+```dockerfile
+FROM alpine:3.20
+
+RUN apk add --no-cache curl
+```
+
+---
+
+## tally/no-trailing-spaces 🔧
+
+| | |
+|---|---|
+| **Severity** | Style |
+| **Default** | Enabled |
+| **Auto-fix** | Yes (`--fix`) |
+
+Disallows trailing whitespace at the end of lines. Trailing spaces cause invisible diffs and are removed by most editors' format-on-save.
+
+**Configuration:**
+
+```toml
+[rules.tally.no-trailing-spaces]
+severity = "style"
+```
+
+---
+
+## tally/eol-last 🔧
+
+| | |
+|---|---|
+| **Severity** | Style |
+| **Default** | Enabled |
+| **Auto-fix** | Yes (`--fix`) |
+
+Enforces a newline at the end of non-empty files. POSIX requires text files to end with a newline, and missing final newlines cause noisy diffs.
+
+---
+
+## tally/epilogue-order 🔧
+
+| | |
+|---|---|
+| **Severity** | Style |
+| **Default** | Enabled |
+| **Auto-fix** | Yes (`--fix`) |
+
+Enforces canonical ordering for epilogue instructions at the end of each output stage:
+
+**`STOPSIGNAL` → `HEALTHCHECK` → `ENTRYPOINT` → `CMD`**
+
+These instructions configure runtime behavior rather than image construction, and placing them last — in canonical order — makes Dockerfiles easier to scan.
+
+Applies to the final stage and any stage with no dependents. Builder stages are skipped.
+
+**Violation (CMD before RUN, and before ENTRYPOINT):**
+
+```dockerfile
+FROM alpine:3.20
+CMD ["/app", "serve"]
+RUN apk add --no-cache ca-certificates
+ENTRYPOINT ["/app"]
+```
+
+**Fix:**
+
+```dockerfile
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates
+ENTRYPOINT ["/app"]
+CMD ["serve"]
+```
+
+---
+
+## tally/sort-packages 🔧
+
+| | |
+|---|---|
+| **Severity** | Style |
+| **Default** | Enabled |
+| **Auto-fix** | Yes (`--fix`) |
+
+Package lists in install commands should be sorted alphabetically. Sorted lists prevent duplicate packages, make diffs easier to read, and match [Docker's official best practices](https://docs.docker.com/build/building/best-practices/#sort-multi-line-arguments).
+
+Supported package managers: apt/apt-get, apk, dnf, yum, zypper, npm, yarn, pnpm, pip, bundle, composer, uv, choco, and more.
+
+**Violation:**
+
+```dockerfile
+RUN apt-get update && apt-get install -y \
+    wget \
+    curl \
+    git \
+    mercurial
+
+RUN npm install express axios
+```
+
+**Fix:**
+
+```dockerfile
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    mercurial \
+    wget
+
+RUN npm install axios express
+```
+
+---
+
+## tally/newline-per-chained-call 🔧
+
+| | |
+|---|---|
+| **Severity** | Style |
+| **Default** | Enabled |
+| **Auto-fix** | Yes (`--fix`) |
+
+Each chained element within an instruction should be on its own continuation line. Applies to `&&`/`||` chains in `RUN` and `HEALTHCHECK CMD`, multiple `--mount=` flags in `RUN`, and multiple `key=value` pairs in `LABEL`.
+
+**Violation:**
+
+```dockerfile
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+
+RUN --mount=type=cache,target=/var/cache/apt --mount=type=bind,source=go.sum,target=go.sum apt-get update
+
+LABEL org.opencontainers.image.title=myapp org.opencontainers.image.version=1.0
+```
+
+**Fix:**
+
+```dockerfile
+RUN apt-get update \
+	&& apt-get install -y curl \
+	&& rm -rf /var/lib/apt/lists/*
+
+RUN --mount=type=cache,target=/var/cache/apt \
+	--mount=type=bind,source=go.sum,target=go.sum \
+	apt-get update
+
+LABEL org.opencontainers.image.title=myapp \
+	org.opencontainers.image.version=1.0
+```
+
+**Configuration (require 3+ chained commands before splitting):**
+
+```toml
+[rules.tally.newline-per-chained-call]
+min-commands = 3
+```
+
+---
+
+## tally/prefer-copy-chmod 🔧
+
+| | |
+|---|---|
+| **Severity** | Info |
+| **Default** | Enabled |
+| **Auto-fix** | Yes (`--fix`) |
+
+Prefers `COPY --chmod` over a separate `COPY` followed by `RUN chmod`. Merging the two instructions removes an extra layer and avoids spawning a shell container just to set permissions.
+
+Supports both octal (`755`, `0755`) and symbolic (`+x`, `u+rwx`) chmod modes.
+
+**Violation:**
+
+```dockerfile
+FROM python:3.12-slim
+
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+COPY --chown=appuser:appuser start.sh /usr/local/bin/start.sh
+RUN chmod 755 /usr/local/bin/start.sh
+```
+
+**Fix:**
+
+```dockerfile
+FROM python:3.12-slim
+
+COPY --chmod=+x entrypoint.sh /app/entrypoint.sh
+
+COPY --chmod=755 --chown=appuser:appuser start.sh /usr/local/bin/start.sh
+```
+
+---
+
+## tally/prefer-run-heredoc 🔧
+
+| | |
+|---|---|
+| **Severity** | Style |
+| **Default** | Off (experimental) |
+| **Auto-fix** | Yes (`--fix`) |
+
+Suggests converting multi-command `RUN` instructions to heredoc syntax for readability. Heredocs eliminate `&&` and `\` clutter, give each command its own line, and produce cleaner diffs.
+
+<Note>
+The generated heredoc includes `set -e` to preserve the fail-fast behavior of `&&` chains — see [moby/buildkit#2722](https://github.com/moby/buildkit/issues/2722) for context.
+</Note>
+
+**Violation:**
+
+```dockerfile
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl tzdata && \
+    rm -rf /var/lib/apt/lists/*
+```
+
+**Fix:**
+
+```dockerfile
+RUN <<EOF
+set -e
+apt-get update
+apt-get install -y --no-install-recommends ca-certificates curl tzdata
+rm -rf /var/lib/apt/lists/*
+EOF
+```
+
+**Enable in `.tally.toml`:**
+
+```toml
+[rules.tally.prefer-run-heredoc]
+severity = "style"
+min-commands = 3
+check-consecutive-runs = true
+check-chained-commands = true
+```
+
+---
+
+## tally/consistent-indentation 🔧
+
+| | |
+|---|---|
+| **Severity** | Style |
+| **Default** | Off (experimental) |
+| **Auto-fix** | Yes (`--fix`) |
+
+Enforces consistent tab indentation in multi-stage Dockerfiles. In a multi-stage file, commands within each stage are indented with one tab; `FROM` lines remain at column 0. In single-stage files, all indentation is removed.
+
+<Note>
+This rule always uses **tabs**, not spaces. Docker heredoc `<<-` strips leading tabs from body lines; there is no equivalent for spaces, so tabs are the only correct choice when indentation is applied to heredoc instructions.
+</Note>
+
+**Violation (multi-stage without indentation):**
+
+```dockerfile
+FROM golang:1.23 AS builder
+WORKDIR /src
+RUN go build -o /app
+FROM alpine:3.20
+COPY --from=builder /app /app
+```
+
+**Fix:**
+
+```dockerfile
+FROM golang:1.23 AS builder
+	WORKDIR /src
+	RUN go build -o /app
+FROM alpine:3.20
+	COPY --from=builder /app /app
+```
+
+**Enable in `.tally.toml`:**
+
+```toml
+[rules.tally.consistent-indentation]
+severity = "style"
+```
+
+---
+
+## tally/powershell/prefer-shell-instruction 🔧
+
+| | |
+|---|---|
+| **Severity** | Style |
+| **Default** | Enabled (experimental) |
+| **Auto-fix** | Yes (unsafe — `--fix --fix-unsafe`) |
+
+Prefers a `SHELL` instruction over repeating `pwsh -Command` or `powershell -Command` wrappers in every `RUN` instruction. A dedicated `SHELL` centralizes the shell choice and allows tally to inject sane defaults (`$ErrorActionPreference = 'Stop'`, `$ProgressPreference = 'SilentlyContinue'`).
+
+Applies to both Windows containers and Linux images with PowerShell installed.
+
+**Violation:**
+
+```dockerfile
+FROM mcr.microsoft.com/powershell:ubuntu-22.04
+
+RUN pwsh -NoLogo -NoProfile -Command Install-Module PSReadLine -Force
+ENV POWERSHELL_TELEMETRY_OPTOUT=1
+RUN pwsh -NoLogo -NoProfile -Command Invoke-WebRequest https://example.com/tools.zip -OutFile /tmp/tools.zip
+```
+
+**Fix:**
+
+```dockerfile
+FROM mcr.microsoft.com/powershell:ubuntu-22.04
+
+SHELL ["pwsh", "-NoLogo", "-NoProfile", "-Command", "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue';"]
+RUN Install-Module PSReadLine -Force
+ENV POWERSHELL_TELEMETRY_OPTOUT=1
+RUN Invoke-WebRequest https://example.com/tools.zip -OutFile /tmp/tools.zip
+```
+
+**Configuration:**
+
+```toml
+[rules.tally."powershell/prefer-shell-instruction"]
+severity = "style"
+```

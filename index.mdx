@@ -1,97 +1,115 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "tally — Dockerfile Linter & Formatter"
+description: "Keep your Dockerfiles and Containerfiles clean, modern, and consistent. tally uses BuildKit's official parser with 105+ rules and safe auto-fixes."
 ---
 
-## Setting up
+tally is a production-grade **Dockerfile and Containerfile linter + formatter** that catches issues before they reach production. It uses the same parser behind `docker buildx`, understands modern BuildKit syntax, and can fix many issues automatically.
 
-Get your documentation site up and running in minutes.
+```bash
+# Lint everything in your repo
+tally lint .
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
+# Apply all safe fixes automatically
+tally lint --fix Dockerfile
+```
 
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install via Homebrew, npm, pip, RubyGems, WinGet, Go, or Docker.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Quick start" icon="rocket" href="/quickstart">
+    Lint your first Dockerfile in under a minute.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Rules reference" icon="list-check" href="/rules/overview">
+    105+ rules across BuildKit, tally, and Hadolint namespaces.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Configuration" icon="gear" href="/guides/configuration">
+    Configure rules, output formats, and fix modes with `.tally.toml`.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Why tally?
 
-Everything you need to create world-class documentation.
+<CardGroup cols={2}>
+  <Card title="BuildKit-native" icon="docker">
+    Understands heredocs, `RUN --mount`, `COPY --link`, and `ADD --checksum`. No lag behind new Docker features.
+  </Card>
+  <Card title="Fixes, not just findings" icon="wrench">
+    `--fix` applies safe, mechanical rewrites. `--fix-unsafe` unlocks AI-powered improvements via ACP.
+  </Card>
+  <Card title="Broad rule coverage" icon="shield-check">
+    22 BuildKit checks + 46 tally rules + 37 Hadolint rules + embedded ShellCheck for shell snippets.
+  </Card>
+  <Card title="CI & editor ready" icon="circle-check">
+    Outputs text, JSON, SARIF, GitHub Actions annotations, and Markdown. VS Code and JetBrains extensions included.
+  </Card>
+  <Card title="No Docker daemon required" icon="server">
+    Pure static analysis. Registry-aware checks use a Podman-compatible client — no Docker Desktop needed.
+  </Card>
+  <Card title="Windows-container aware" icon="windows">
+    Detects Windows containers, understands Windows paths, and parses PowerShell `RUN` instructions semantically.
+  </Card>
+</CardGroup>
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+## Get started
 
-## Need inspiration?
+<Steps>
+  <Step title="Install tally">
+    Pick your preferred package manager:
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+    ```bash
+    # Homebrew (macOS/Linux)
+    brew install wharflab/tap/tally
+
+    # npm
+    npm install -g tally-cli
+
+    # Go
+    go install github.com/wharflab/tally@latest
+    ```
+  </Step>
+  <Step title="Lint your Dockerfile">
+    Run tally against your Dockerfile or recursively across your whole repo:
+
+    ```bash
+    tally lint Dockerfile
+    tally lint .
+    ```
+  </Step>
+  <Step title="Apply auto-fixes">
+    Fix safe, mechanical issues automatically:
+
+    ```bash
+    tally lint --fix Dockerfile
+    ```
+  </Step>
+  <Step title="Add a config file">
+    Create `.tally.toml` to set project-wide defaults:
+
+    ```toml .tally.toml
+    [output]
+    format = "text"
+    fail-level = "warning"
+
+    [rules]
+    include = ["buildkit/*", "tally/*", "hadolint/*"]
+    ```
+  </Step>
+</Steps>
+
+## Explore the docs
+
+<CardGroup cols={2}>
+  <Card title="Auto-fix guide" icon="wand-magic-sparkles" href="/guides/auto-fix">
+    Learn how safe fixes and AI-powered fixes work.
+  </Card>
+  <Card title="AI AutoFix via ACP" icon="robot" href="/guides/ai-autofix">
+    Use your own AI agent to apply complex Dockerfile improvements.
+  </Card>
+  <Card title="CI/CD integration" icon="code-branch" href="/guides/ci-cd">
+    Add tally to GitHub Actions, GitLab CI, and other pipelines.
+  </Card>
+  <Card title="IDE integration" icon="display" href="/guides/ide-integration">
+    Real-time linting in VS Code, JetBrains, and any LSP editor.
+  </Card>
+</CardGroup>

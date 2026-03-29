@@ -1,0 +1,134 @@
+---
+title: "Windows rules"
+description: "tally Windows container rules catch instructions that are silently ignored or fail at runtime on Windows containers, including unsupported RUN mounts and POSIX signals."
+---
+
+tally includes two rules specifically for Windows containers. These rules target instructions that BuildKit accepts at parse time but fail or have no effect on Windows at runtime — a particularly costly problem because Windows base images can be 5+ GB.
+
+<Note>
+tally detects Windows containers automatically from the base image (e.g., `mcr.microsoft.com/windows/*`, `mcr.microsoft.com/windowsservercore/*`, `mcr.microsoft.com/nanoserver/*`). Windows-specific rules only fire on stages tally identifies as Windows containers.
+</Note>
+
+## Windows container awareness in tally
+
+Beyond these two rules, tally's Windows-container awareness extends across the full rule set:
+
+- **PowerShell parsing** — tally parses full PowerShell syntax within `RUN` instructions, enabling semantic analysis of PowerShell `RUN` steps as real code rather than opaque strings.
+- **cmd.exe detection** — tally recognizes `cmd.exe` shell patterns and applies Windows-appropriate analysis.
+- **PowerShell `SHELL` rule** — `tally/powershell/prefer-shell-instruction` detects repeated `pwsh -Command` wrappers and suggests a `SHELL` instruction.
+- **User creation detection** — `tally/user-created-but-never-used` recognizes Windows `net user /add` and `New-LocalUser` commands.
+- **Shell directive** — `# hadolint shell=powershell` and `# tally shell=powershell` disable POSIX-shell analysis rules for Windows stages.
+
+---
+
+## tally/windows/no-run-mounts
+
+| | |
+|---|---|
+| **Severity** | Error |
+| **Default** | Enabled |
+| **Auto-fix** | No |
+
+All `RUN --mount` types (`cache`, `secret`, `ssh`, `bind`, `tmpfs`) fail at runtime on Windows containers. BuildKit processes mount flags identically regardless of OS — there is no platform guard at parse time. The build starts, pulls the base image, begins executing layers, and only fails when the HCS (Host Compute Service) runtime attempts to set up the mount.
+
+On large Windows base images (5+ GB), this means the failure surfaces after several minutes of pulling. This rule catches the problem immediately at lint time.
+
+**Affected mount types:**
+
+| Mount type | Runtime behavior on Windows |
+|------------|----------------------------|
+| `--mount=type=cache` | HCS error setting up cache volume |
+| `--mount=type=secret` | tmpfs-based secrets not supported |
+| `--mount=type=ssh` | Unix socket forwarding unavailable |
+| `--mount=type=bind` | Bind mount semantics differ on HCS |
+| `--mount=type=tmpfs` | tmpfs is not a Windows concept |
+
+**Violation:**
+
+```dockerfile
+FROM mcr.microsoft.com/windows/servercore:ltsc2022
+
+RUN --mount=type=cache,target=C:\Users\ContainerUser\.nuget\packages \
+    dotnet restore
+
+RUN --mount=type=secret,id=nuget_token \
+    cmd /C type C:\run\secrets\nuget_token
+```
+
+**Fix — remove mount flags on Windows stages:**
+
+```dockerfile
+FROM mcr.microsoft.com/windows/servercore:ltsc2022
+
+# Pass credentials via build ARG instead
+ARG NUGET_TOKEN
+RUN dotnet restore
+```
+
+Linux stages that use mounts are unaffected:
+
+```dockerfile
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+# Linux stage — mounts work fine here
+RUN --mount=type=cache,target=/root/.nuget/packages dotnet restore
+
+FROM mcr.microsoft.com/windows/servercore:ltsc2022
+# Windows stage — no mounts
+COPY --from=build /app /app
+```
+
+**Configuration:**
+
+```toml
+[rules.tally."windows/no-run-mounts"]
+severity = "error"
+```
+
+---
+
+## tally/windows/no-stopsignal 🔧
+
+| | |
+|---|---|
+| **Severity** | Warning |
+| **Default** | Enabled |
+| **Auto-fix** | Yes (`--fix`) — comments out the instruction |
+
+Windows containers do not support POSIX signals. The `STOPSIGNAL` instruction is silently accepted by BuildKit and written to the image config, but has no effect at runtime. Windows processes receive a WM_CLOSE message instead of a signal when stopped.
+
+BuildKit's own `CheckPlatform()` method on `StopSignalCommand` is designed to reject this on Windows, but the check is never called in the dispatch path — so there is no build-time warning from Docker itself. This rule catches the silent no-op at lint time.
+
+**Violation:**
+
+```dockerfile
+FROM mcr.microsoft.com/windows/servercore:ltsc2022
+STOPSIGNAL SIGTERM
+CMD ["myapp.exe"]
+```
+
+**Fix — the instruction is commented out:**
+
+```dockerfile
+FROM mcr.microsoft.com/windows/servercore:ltsc2022
+# [commented out by tally - STOPSIGNAL has no effect on Windows containers]: STOPSIGNAL SIGTERM
+CMD ["myapp.exe"]
+```
+
+Linux stages can use `STOPSIGNAL` normally:
+
+```dockerfile
+FROM alpine:3.20
+STOPSIGNAL SIGTERM
+CMD ["myapp"]
+```
+
+**Related rules:**
+
+- [`tally/no-ungraceful-stopsignal`](/rules/tally/correctness) — checks the signal value on Linux stages and automatically skips Windows stages (since this rule handles them).
+
+**Configuration:**
+
+```toml
+[rules.tally."windows/no-stopsignal"]
+severity = "warning"
+```

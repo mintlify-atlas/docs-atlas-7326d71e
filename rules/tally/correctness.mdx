@@ -1,0 +1,491 @@
+---
+title: "Correctness rules"
+description: "tally correctness rules catch structural mistakes, invalid syntax, broken stage dependencies, and misconfigured instructions in Dockerfiles."
+---
+
+tally includes 15 correctness rules covering everything from fail-fast syntax checks to registry-validated platform verification. All are enabled by default.
+
+<AccordionGroup>
+
+<Accordion title="tally/require-stages — Error">
+
+| | |
+|---|---|
+| **Severity** | Error |
+| **Default** | Enabled |
+| **Auto-fix** | No |
+
+Every Dockerfile must contain at least one `FROM` instruction. A file with `ARG`, `RUN`, `COPY`, or other instructions but no `FROM` always fails at build time.
+
+This is a fail-fast check: it aborts with exit code 4 before any other rules run.
+
+**Violation:**
+
+```dockerfile
+ARG VERSION=1.0
+RUN apk add --no-cache curl
+COPY . /app
+```
+
+**Fix — add a `FROM` instruction:**
+
+```dockerfile
+ARG VERSION=1.0
+FROM alpine:3.20
+RUN apk add --no-cache curl
+COPY . /app
+```
+
+</Accordion>
+
+<Accordion title="tally/unknown-instruction — Error">
+
+| | |
+|---|---|
+| **Severity** | Error |
+| **Default** | Enabled |
+| **Auto-fix** | No |
+
+Detects misspelled or invalid Dockerfile instruction keywords. Like `tally/require-stages`, this is a fail-fast syntax check that aborts with exit code 4.
+
+**Violation:**
+
+```dockerfile
+FROM alpine:3.20
+RRUN apk add --no-cache curl
+COOPY . /app
+```
+
+**Fix — correct the instruction spelling:**
+
+```dockerfile
+FROM alpine:3.20
+RUN apk add --no-cache curl
+COPY . /app
+```
+
+</Accordion>
+
+<Accordion title="tally/syntax-directive-typo — Error">
+
+| | |
+|---|---|
+| **Severity** | Error |
+| **Default** | Enabled |
+| **Auto-fix** | No |
+
+Detects typos in `# syntax=` parser directives at the top of the file. A mistyped directive is silently ignored by BuildKit, causing the file to be parsed with the default frontend rather than the intended one.
+
+This is a fail-fast syntax check (exit code 4).
+
+**Violation:**
+
+```dockerfile
+# syntex=docker/dockerfile:1
+FROM alpine:3.20
+```
+
+**Fix:**
+
+```dockerfile
+# syntax=docker/dockerfile:1
+FROM alpine:3.20
+```
+
+</Accordion>
+
+<Accordion title="tally/max-lines — Error">
+
+| | |
+|---|---|
+| **Severity** | Error |
+| **Default** | Enabled (50 lines) |
+| **Auto-fix** | No |
+
+Enforces a maximum number of lines in a Dockerfile to encourage modular, maintainable builds. The default limit of 50 lines reflects the P90 of analyzed public Dockerfiles. Blank lines and comments are excluded from the count by default.
+
+**Violation (exceeds 50 content lines):**
+
+```dockerfile
+FROM ubuntu:22.04
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    git \
+    # ... many more packages and setup steps ...
+    vim
+```
+
+**Fix — split into base image and application-specific setup:**
+
+```dockerfile
+FROM myorg/base:1.0
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+COPY . .
+CMD ["python", "app.py"]
+```
+
+**Configuration:**
+
+```toml
+[rules.tally.max-lines]
+severity = "warning"
+max = 100
+skip-blank-lines = true
+skip-comments = true
+```
+
+```bash
+tally lint --max-lines 100 --skip-blank-lines --skip-comments Dockerfile
+```
+
+</Accordion>
+
+<Accordion title="tally/no-unreachable-stages — Warning">
+
+| | |
+|---|---|
+| **Severity** | Warning |
+| **Default** | Enabled |
+| **Auto-fix** | No |
+
+Warns about build stages that are defined but never used. A stage is unreachable if it is not the final stage, not referenced by `COPY --from`, and not a valid `--target`.
+
+**Violation:**
+
+```dockerfile
+# This stage is never referenced anywhere
+FROM golang:1.21 AS unused-builder
+RUN go build -o /app .
+
+FROM golang:1.21 AS builder
+COPY . .
+RUN go build -o /app .
+
+FROM alpine:3.18
+COPY --from=builder /app /app
+CMD ["/app"]
+```
+
+**Fix — remove the unused stage or wire it in:**
+
+```dockerfile
+FROM golang:1.21 AS builder
+COPY . .
+RUN go build -o /app .
+
+FROM alpine:3.18
+COPY --from=builder /app /app
+CMD ["/app"]
+```
+
+</Accordion>
+
+<Accordion title="tally/shell-run-in-scratch — Warning">
+
+| | |
+|---|---|
+| **Severity** | Warning |
+| **Default** | Enabled |
+| **Auto-fix** | No |
+
+Detects shell-form `RUN` instructions in stages based on `scratch`, where no shell exists. Shell-form `RUN` requires `/bin/sh`; using it in a scratch stage always fails at build time.
+
+**Violation:**
+
+```dockerfile
+FROM scratch
+RUN echo "this will fail"
+```
+
+**Fix — use exec-form, which does not require a shell:**
+
+```dockerfile
+FROM scratch
+COPY app /app
+CMD ["/app"]
+```
+
+</Accordion>
+
+<Accordion title="tally/no-ungraceful-stopsignal 🔧 — Warning">
+
+| | |
+|---|---|
+| **Severity** | Warning |
+| **Default** | Enabled |
+| **Auto-fix** | Yes (suggestion — `--fix --fix-unsafe`) |
+
+`STOPSIGNAL` should not use `SIGKILL` (signal 9) or `SIGSTOP` (signal 19). `SIGKILL` cannot be caught or handled, so the process is terminated immediately with no chance for cleanup. `SIGSTOP` suspends the process instead of stopping it, causing the container to never exit.
+
+Also detects non-canonical forms: numeric signals (`9`, `19`), missing `SIG` prefix (`KILL`, `STOP`), and lowercase variants.
+
+Windows stages are skipped because `STOPSIGNAL` has no effect on Windows containers.
+
+**Violation:**
+
+```dockerfile
+FROM alpine:3.20
+STOPSIGNAL SIGKILL
+CMD ["/app"]
+```
+
+**Fix (replaces with `SIGTERM`):**
+
+```dockerfile
+FROM alpine:3.20
+STOPSIGNAL SIGTERM
+CMD ["/app"]
+```
+
+<Note>
+Review the suggested fix before applying — some daemons prefer specific signals (`SIGQUIT` for nginx, `SIGINT` for PostgreSQL).
+</Note>
+
+</Accordion>
+
+<Accordion title="tally/prefer-canonical-stopsignal 🔧 — Info / Style">
+
+| | |
+|---|---|
+| **Severity** | Info |
+| **Default** | Enabled |
+| **Auto-fix** | Yes (`--fix`) |
+
+`STOPSIGNAL` should use the canonical `SIG`-prefixed name (e.g., `SIGTERM`) rather than a bare name (`TERM`) or numeric value (`15`). Canonical names are unambiguous and more readable.
+
+**Violation:**
+
+```dockerfile
+FROM alpine:3.20
+STOPSIGNAL TERM
+CMD ["/app"]
+```
+
+**Fix:**
+
+```dockerfile
+FROM alpine:3.20
+STOPSIGNAL SIGTERM
+CMD ["/app"]
+```
+
+</Accordion>
+
+<Accordion title="tally/invalid-onbuild-trigger 🔧 — Error">
+
+| | |
+|---|---|
+| **Severity** | Error |
+| **Default** | Enabled |
+| **Auto-fix** | Yes (suggestion — `--fix --fix-unsafe`) |
+
+`ONBUILD` triggers must use valid Dockerfile instructions. Invalid trigger instructions cause build failures in downstream images that inherit from this base.
+
+**Violation:**
+
+```dockerfile
+FROM alpine:3.20
+ONBUILD INVALID_INSTRUCTION
+```
+
+**Fix — use a valid instruction:**
+
+```dockerfile
+FROM alpine:3.20
+ONBUILD RUN apk add --no-cache curl
+```
+
+</Accordion>
+
+<Accordion title="tally/circular-stage-deps — Error">
+
+| | |
+|---|---|
+| **Severity** | Error |
+| **Default** | Enabled |
+| **Auto-fix** | No |
+
+Detects cycles in the stage dependency graph formed by `COPY --from`, `RUN --mount=from=`, and `FROM` references. Circular dependencies always cause build failures — no stage in the cycle can finish before the others.
+
+**Violation:**
+
+```dockerfile
+FROM golang:1.22-alpine AS builder
+COPY --from=runtime /usr/local/bin/tini /usr/local/bin/tini
+RUN go build -o /app ./cmd/server
+
+FROM alpine:3.19 AS runtime
+COPY --from=builder /app /usr/local/bin/app
+RUN apk add --no-cache ca-certificates
+```
+
+**Fix — ensure dependencies flow in one direction:**
+
+```dockerfile
+FROM golang:1.22-alpine AS builder
+RUN go build -o /app ./cmd/server
+
+FROM alpine:3.19 AS runtime
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /app /usr/local/bin/app
+```
+
+</Accordion>
+
+<Accordion title="tally/copy-from-empty-scratch-stage — Error">
+
+| | |
+|---|---|
+| **Severity** | Error |
+| **Default** | Enabled |
+| **Auto-fix** | No |
+
+Detects `COPY --from` referencing a scratch-based stage that contains no file-producing instructions (`COPY`, `ADD`, `RUN`). Copying from an empty scratch stage always produces an empty result or a build error.
+
+**Violation:**
+
+```dockerfile
+FROM scratch AS certs
+
+FROM alpine:3.20
+COPY --from=certs /etc/ssl/certs /etc/ssl/certs
+```
+
+**Fix — add file-producing instructions to the scratch stage:**
+
+```dockerfile
+FROM alpine:3.20 AS certs
+RUN apk add --no-cache ca-certificates
+
+FROM scratch AS final
+COPY --from=certs /etc/ssl/certs /etc/ssl/certs
+```
+
+</Accordion>
+
+<Accordion title="tally/invalid-json-form 🔧 — Error">
+
+| | |
+|---|---|
+| **Severity** | Error |
+| **Default** | Enabled |
+| **Auto-fix** | Yes (suggestion — `--fix --fix-unsafe`) |
+
+`CMD`, `ENTRYPOINT`, `RUN`, `SHELL`, and other instructions accept JSON exec-form syntax. When arguments start with `[` but contain invalid JSON (unquoted strings, single quotes, trailing commas), BuildKit silently falls back to shell form — producing unexpected behavior.
+
+**Violation:**
+
+```dockerfile
+FROM alpine:3.20
+
+# Unquoted strings
+CMD [bash, -lc, "echo hello"]
+
+# Single quotes — not valid JSON
+ENTRYPOINT ['/usr/bin/app', '--serve']
+```
+
+**Fix:**
+
+```dockerfile
+FROM alpine:3.20
+
+CMD ["bash", "-lc", "echo hello"]
+ENTRYPOINT ["/usr/bin/app", "--serve"]
+```
+
+</Accordion>
+
+<Accordion title="tally/platform-mismatch — Error">
+
+| | |
+|---|---|
+| **Severity** | Error |
+| **Default** | Enabled |
+| **Requires** | `--slow-checks=on` (registry queries) |
+| **Auto-fix** | No |
+
+When a `FROM` instruction uses an explicit `--platform` flag, this rule queries the container registry to verify that the requested platform is actually available. This catches provable mismatches before they fail at build time.
+
+Only fires when `--platform` is explicitly set. Skips automatic build args (`$BUILDPLATFORM`, `$TARGETPLATFORM`).
+
+**Violation (if `python:3.12` does not publish `linux/riscv64`):**
+
+```dockerfile
+FROM --platform=linux/riscv64 python:3.12
+RUN pip install flask
+```
+
+**Fix — omit `--platform` or use a platform the image actually provides:**
+
+```dockerfile
+FROM python:3.12
+RUN pip install flask
+```
+
+</Accordion>
+
+<Accordion title="tally/curl-should-follow-redirects 🔧 — Warning">
+
+| | |
+|---|---|
+| **Severity** | Warning |
+| **Default** | Enabled |
+| **Auto-fix** | Yes (unsafe — `--fix --fix-unsafe`) |
+
+`curl` commands should include `-L` / `--location` to follow HTTP redirects (301, 302, 307, 308). Without it, downloads silently fail when URLs are relocated.
+
+The fix uses `--follow` instead of `--location` when `-X`/`--request` specifies a non-standard method (DELETE, PATCH), because `--location` changes non-GET methods to GET on redirects.
+
+**Violation:**
+
+```dockerfile
+FROM ubuntu:22.04
+RUN curl -fsSo /tmp/file.tar.gz https://example.com/file.tar.gz
+```
+
+**Fix:**
+
+```dockerfile
+FROM ubuntu:22.04
+RUN curl --location -fsSo /tmp/file.tar.gz https://example.com/file.tar.gz
+```
+
+</Accordion>
+
+<Accordion title="tally/prefer-curl-config 🔧 — Info">
+
+| | |
+|---|---|
+| **Severity** | Info |
+| **Default** | Enabled |
+| **Auto-fix** | Yes (unsafe — `--fix --fix-unsafe`) |
+
+Stages that use `curl` (by invocation or package installation) should include a `.curlrc` retry configuration to handle transient network failures. The rule emits at most one violation per stage.
+
+The auto-fix inserts `ENV CURL_HOME` and a `COPY` heredoc with retry settings before the first relevant `RUN`:
+
+```dockerfile
+ENV CURL_HOME=/etc/curl
+COPY --chmod=0644 <<EOF ${CURL_HOME}/.curlrc
+--retry-connrefused
+--connect-timeout 15
+--retry 5
+--max-time 300
+EOF
+```
+
+**Configuration (to override defaults):**
+
+```toml
+[rules.tally.prefer-curl-config]
+retry = 3
+connect-timeout = 10
+max-time = 120
+```
+
+</Accordion>
+
+</AccordionGroup>
